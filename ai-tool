@@ -6,7 +6,7 @@
 #
 # Author:      Angel <angel@zbk>
 # License:     MIT
-# Version:     1.1.0
+# Version:     1.2.0
 # Repository:  https://github.com/angelgnzlz/ai-tool
 #
 set -euo pipefail
@@ -15,7 +15,7 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 readonly SCRIPT_NAME="$(basename "${0}")"
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.2.0"
 
 readonly APP_DIR="${HOME}/.local/bin"
 readonly ICON_DIR="${HOME}/.local/share/icons"
@@ -67,9 +67,10 @@ OPTIONS
           <path>      Path to the .AppImage file (required).
           [name]      Name shown in the application menu (optional). If
                       omitted, the file name is cleaned up automatically.
-          [wm_class]  Value for StartupWMClass (optional). Required for the
-                      GNOME dock to associate the window with the launcher.
-                      If omitted, [name] is used as the value.
+          [wm_class]  Value for StartupWMClass (optional). If omitted, the
+                      script tries to auto-detect it from the .desktop file
+                      bundled inside the AppImage. If no .desktop file is
+                      found, [name] is used as the value.
   -u, --uninstall <id_or_name>
         Uninstall the given AppImage. Accepts the ID (e.g. obsidian) or the
         displayed name (e.g. Obsidian), case-insensitive.
@@ -84,10 +85,10 @@ OPTIONS
         Show the version and exit.
 
 EXAMPLES
-  # Basic install (WM_CLASS = name)
+  # Basic install (WM_CLASS auto-detected from the AppImage)
   ${SCRIPT_NAME} -i ~/Downloads/MyApp.AppImage "MyApp"
 
-  # Install with explicit WM_CLASS (recommended for GNOME)
+  # Install with explicit WM_CLASS (overrides auto-detection)
   ${SCRIPT_NAME} -i ~/Downloads/Obsidian-1.14.5-arm64.AppImage "Obsidian" "md.obsidian.Obsidian"
 
   # Install without a custom name
@@ -99,10 +100,15 @@ EXAMPLES
   ${SCRIPT_NAME} --update
 
 NOTE ABOUT GNOME
-  If the dock shows a generic gear icon and the window's internal name
-  instead of the defined name, pass the third argument with the value GNOME
-  sees for the window. You can get it by hovering over the open window in the
-  dock. For Obsidian it is usually "md.obsidian.Obsidian".
+  On GNOME, if the dock shows a generic gear icon and the window's internal
+  name instead of the defined name, GNOME cannot associate the window with the
+  .desktop file. This is fixed with the StartupWMClass key.
+
+  The script first tries to read StartupWMClass from the .desktop file that
+  the AppImage bundles. If that file is missing or does not define the key,
+  it falls back to [name]. If the dock still shows the wrong icon or name,
+  pass the third argument explicitly. You can get the value by opening the
+  app and hovering over its window in the dock.
 
 DIRECTORIES
   AppImages:  ${APP_DIR}
@@ -198,11 +204,15 @@ uninstall_app() {
 }
 
 # ---------------------------------------------------------------------------
-# Extract icon from the AppImage
+# Extract icon and bundled .desktop metadata from the AppImage
 # ---------------------------------------------------------------------------
-extract_icon() {
+# Sets two global variables:
+#   EXTRACTED_ICON     path to the copied icon (or a generic fallback)
+#   EXTRACTED_WMCLASS  value of StartupWMClass from the bundled .desktop, or empty
+extract_metadata() {
     local appimage="$1" app_id="$2" filename="$3"
-    local icon_found="" target_icon=""
+    EXTRACTED_ICON=""
+    EXTRACTED_WMCLASS=""
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
@@ -212,6 +222,8 @@ extract_icon() {
 
     local squash="${tmp_dir}/squashfs-root"
     if [ -d "${squash}" ]; then
+        # --- Icon ---
+        local icon_found=""
         icon_found=$(find "${squash}" -type f \( -iname "*.png" -o -iname "*.svg" -o -iname "*.xpm" \) \
             | grep -iE "(^|/)(${app_id}|${filename}|icon|logo)" | head -n 1 || true)
         if [ -z "${icon_found}" ]; then
@@ -223,13 +235,20 @@ extract_icon() {
 
         if [ -n "${icon_found}" ]; then
             local ext="${icon_found##*.}"
-            target_icon="${ICON_DIR}/${app_id}.${ext}"
-            cp "${icon_found}" "${target_icon}"
-            echo "${target_icon}"
-            return 0
+            EXTRACTED_ICON="${ICON_DIR}/${app_id}.${ext}"
+            cp "${icon_found}" "${EXTRACTED_ICON}"
+        fi
+
+        # --- StartupWMClass from the bundled .desktop ---
+        local bundled_desktop=""
+        bundled_desktop=$(find "${squash}" -maxdepth 2 -name "*.desktop" -type f 2>/dev/null | head -n 1 || true)
+        if [ -n "${bundled_desktop}" ]; then
+            EXTRACTED_WMCLASS=$(grep -m1 '^StartupWMClass=' "${bundled_desktop}" \
+                | cut -d= -f2- | tr -d '[:space:]' || true)
         fi
     fi
-    echo "application-x-executable"
+
+    [ -n "${EXTRACTED_ICON}" ] || EXTRACTED_ICON="application-x-executable"
 }
 
 # ---------------------------------------------------------------------------
@@ -243,15 +262,13 @@ install_app() {
     [ -n "${appimage_path}" ] || die "missing AppImage path. Use '${SCRIPT_NAME} --help'."
     [ -f "${appimage_path}" ] || die "file not found: ${appimage_path}"
 
-    local filename clean_name app_name app_id wm_class
+    local filename clean_name app_name app_id
     filename=$(basename "${appimage_path}" .AppImage)
     clean_name=$(echo "${filename}" | sed -E 's/[-_][0-9]+\.[0-9]+.*$//; s/[-_]arm64$//; s/[-_]x86_64$//')
     app_name="${custom_name:-${clean_name}}"
     app_id=$(echo "${app_name}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
-    wm_class="${wm_class_arg:-${app_name}}"
 
     info "Installing: ${app_name} (${app_id})"
-    echo "    StartupWMClass: ${wm_class}"
 
     mkdir -p "${APP_DIR}" "${ICON_DIR}" "${DESKTOP_DIR}"
 
@@ -260,9 +277,23 @@ install_app() {
     chmod +x "${target_appimage}"
     echo "    AppImage copied to: ${target_appimage}"
 
-    local target_icon
-    target_icon=$(extract_icon "${target_appimage}" "${app_id}" "${filename}")
+    # Extract icon and bundled metadata in a single pass
+    extract_metadata "${target_appimage}" "${app_id}" "${filename}"
+    local target_icon="${EXTRACTED_ICON}"
     echo "    Icon: ${target_icon}"
+
+    # Determine StartupWMClass: explicit > bundled .desktop > app name
+    local wm_class
+    if [ -n "${wm_class_arg}" ]; then
+        wm_class="${wm_class_arg}"
+        echo "    StartupWMClass: ${wm_class} (explicit)"
+    elif [ -n "${EXTRACTED_WMCLASS}" ]; then
+        wm_class="${EXTRACTED_WMCLASS}"
+        echo "    StartupWMClass: ${wm_class} (from AppImage metadata)"
+    else
+        wm_class="${app_name}"
+        echo "    StartupWMClass: ${wm_class} (fallback to name)"
+    fi
 
     local desktop_file="${DESKTOP_DIR}/${app_id}.desktop"
     cat > "${desktop_file}" <<EOF
