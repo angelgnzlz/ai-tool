@@ -245,9 +245,9 @@ install_app() {
     mkdir -p "${APP_DIR}" "${ICON_DIR}" "${DESKTOP_DIR}"
 
     local target_appimage="${APP_DIR}/${app_id}.AppImage"
-    mv "${appimage_path}" "${target_appimage}"
+    cp "${appimage_path}" "${target_appimage}"
     chmod +x "${target_appimage}"
-    echo "    AppImage moved to: ${target_appimage}"
+    echo "    AppImage copied to: ${target_appimage}"
 
     local target_icon
     target_icon=$(extract_icon "${target_appimage}" "${app_id}" "${filename}")

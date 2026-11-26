@@ -56,7 +56,7 @@ ai-tool -i <path.AppImage> [name] [wm_class]
 - **`[wm_class]`** (optional): value for `StartupWMClass` in the `.desktop`
   file. **If omitted, `[name]` is used as the value.**
 
-The AppImage is moved to `~/.local/bin`, its icon is extracted to
+The AppImage is copied to `~/.local/bin`, its icon is extracted to
 `~/.local/share/icons`, and the `.desktop` entry is created in
 `~/.local/share/applications/<id>.desktop`.
 
