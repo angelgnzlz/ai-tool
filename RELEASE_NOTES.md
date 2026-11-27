@@ -8,6 +8,12 @@ extraction and GNOME menu integration.
 
 - Install AppImages into `~/.local/bin` without `sudo`.
 - Copy the AppImage (the original file is preserved).
+- Check runtime dependencies before installing: verifies that the AppImage can
+  be extracted (FUSE) and that its main binary has all shared libraries
+  available. If something is missing, shows the install hints for your
+  distribution and asks whether to continue.
+- Detect the application version from `X-AppImage-Version` in the bundled
+  `.desktop` file, or by running the AppImage with `--version` under a timeout.
 - Extract the original icon from the AppImage via `--appimage-extract`.
 - Auto-detect `StartupWMClass` from the `.desktop` file bundled inside the
   AppImage, with an optional third argument to override it.
@@ -52,6 +58,8 @@ ai-tool -i ~/Downloads/Obsidian-1.14.5-arm64.AppImage "Obsidian" "md.obsidian.Ob
 
 - `bash` >= 4.0
 - `coreutils`, `findutils`, `sed`, `grep`, `awk`
+- FUSE (`libfuse2` on Debian/Ubuntu, `fuse`/`fuse-libs` on Fedora,
+  `fuse2` on Arch) to run AppImages
 - `update-desktop-database` (optional, recommended; package `desktop-file-utils`)
 - `curl` and `sha256sum` (only required for `--update`)
 

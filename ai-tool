@@ -117,6 +117,7 @@ DIRECTORIES
 
 DEPENDENCIES
   - bash >= 4.0
+  - FUSE (libfuse2 on Debian/Ubuntu) for running AppImages
   - update-desktop-database (optional, recommended)
   - curl and sha256sum (only required for --update)
 EOF
@@ -128,6 +129,78 @@ EOF
 check_dependencies() {
     command -v update-desktop-database >/dev/null 2>&1 \
         || warn "update-desktop-database not found; the menu may not refresh immediately."
+}
+
+# ---------------------------------------------------------------------------
+# Check AppImage runtime dependencies (FUSE and shared libraries)
+# ---------------------------------------------------------------------------
+# Returns 0 if the AppImage can be extracted and its main binary has all
+# shared libraries available. Returns 1 otherwise, printing the reason.
+check_appimage_dependencies() {
+    local appimage="$1"
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    # Extraction exercises FUSE (or the fallback extractor) and confirms the
+    # AppImage is readable.
+    if ! ( cd "${tmp_dir}" && "${appimage}" --appimage-extract >/dev/null 2>&1 ); then
+        warn "Could not extract the AppImage. FUSE is probably missing or not configured."
+        warn "  Debian/Ubuntu : sudo apt install libfuse2"
+        warn "  Fedora        : sudo dnf install fuse fuse-libs"
+        warn "  Arch          : sudo pacman -S fuse2"
+        rm -rf "${tmp_dir}"
+        return 1
+    fi
+
+    # Locate the main executable inside the extracted tree.
+    local main_bin=""
+    main_bin=$(find "${tmp_dir}/squashfs-root" -maxdepth 1 -type f -name "AppRun" 2>/dev/null | head -n 1 || true)
+    if [ -z "${main_bin}" ]; then
+        main_bin=$(find "${tmp_dir}/squashfs-root" -maxdepth 1 -type f -executable 2>/dev/null | head -n 1 || true)
+    fi
+
+    if [ -n "${main_bin}" ] && command -v ldd >/dev/null 2>&1; then
+        local missing
+        missing=$(ldd "${main_bin}" 2>/dev/null | grep "not found" || true)
+        if [ -n "${missing}" ]; then
+            warn "The AppImage is missing some shared libraries:"
+            while IFS= read -r line; do
+                [ -n "${line}" ] && warn "  ${line}"
+            done <<< "${missing}"
+            warn "Install the corresponding packages for your distribution before running the app."
+            rm -rf "${tmp_dir}"
+            return 1
+        fi
+    fi
+
+    rm -rf "${tmp_dir}"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Detect the application version from the AppImage
+# ---------------------------------------------------------------------------
+# Prints the detected version, or an empty string if it cannot be determined.
+detect_app_version() {
+    local appimage="$1"
+    local tmp_dir version=""
+    tmp_dir=$(mktemp -d)
+
+    if ( cd "${tmp_dir}" && "${appimage}" --appimage-extract >/dev/null 2>&1 ); then
+        local desktop_file
+        desktop_file=$(find "${tmp_dir}/squashfs-root" -maxdepth 2 -name "*.desktop" -type f 2>/dev/null | head -n 1 || true)
+        if [ -n "${desktop_file}" ]; then
+            version=$(grep -m1 '^X-AppImage-Version=' "${desktop_file}" | cut -d= -f2- | tr -d '[:space:]' || true)
+        fi
+    fi
+
+    if [ -z "${version}" ] && command -v timeout >/dev/null 2>&1; then
+        version=$(timeout 5 "${appimage}" --version 2>/dev/null \
+            | head -n 1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1 || true)
+    fi
+
+    rm -rf "${tmp_dir}"
+    printf '%s' "${version}"
 }
 
 # ---------------------------------------------------------------------------
@@ -216,7 +289,6 @@ extract_metadata() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "${tmp_dir}"' RETURN
 
     ( cd "${tmp_dir}" && "${appimage}" --appimage-extract >/dev/null 2>&1 ) || true
 
@@ -248,6 +320,8 @@ extract_metadata() {
         fi
     fi
 
+    rm -rf "${tmp_dir}"
+
     [ -n "${EXTRACTED_ICON}" ] || EXTRACTED_ICON="application-x-executable"
 }
 
@@ -270,6 +344,27 @@ install_app() {
 
     info "Installing: ${app_name} (${app_id})"
 
+    # --- Dependency checks ---
+    info "Checking AppImage runtime dependencies..."
+    if ! check_appimage_dependencies "${appimage_path}"; then
+        printf "Do you want to continue anyway? [y/N] "
+        local continue_anyway
+        read -r continue_anyway
+        case "${continue_anyway}" in
+            [yY]|[yY][eE][sS]) ;;
+            *) info "Installation cancelled."; return 0 ;;
+        esac
+    else
+        ok "Runtime dependencies look OK."
+    fi
+
+    # --- Version detection ---
+    local detected_version
+    detected_version=$(detect_app_version "${appimage_path}")
+    if [ -n "${detected_version}" ]; then
+        info "Detected application version: ${detected_version}"
+    fi
+
     mkdir -p "${APP_DIR}" "${ICON_DIR}" "${DESKTOP_DIR}"
 
     local target_appimage="${APP_DIR}/${app_id}.AppImage"
@@ -277,7 +372,6 @@ install_app() {
     chmod +x "${target_appimage}"
     echo "    AppImage copied to: ${target_appimage}"
 
-    # Extract icon and bundled metadata in a single pass
     extract_metadata "${target_appimage}" "${app_id}" "${filename}"
     local target_icon="${EXTRACTED_ICON}"
     echo "    Icon: ${target_icon}"
@@ -315,6 +409,7 @@ EOF
         && update-desktop-database "${DESKTOP_DIR}" >/dev/null 2>&1 || true
 
     ok "${app_name} installed successfully."
+    [ -n "${detected_version}" ] && echo "    Version: ${detected_version}"
     echo "    To uninstall: ${SCRIPT_NAME} --uninstall ${app_id}"
 }
 
